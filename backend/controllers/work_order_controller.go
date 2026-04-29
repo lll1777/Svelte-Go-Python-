@@ -370,78 +370,120 @@ func (c *WorkOrderController) CreatePrescription(ctx *gin.Context) {
 
 	var req CreatePrescriptionRequest
 	if err := ctx.ShouldBindJSON(&req); err != nil {
-		ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		ctx.JSON(http.StatusBadRequest, gin.H{
+			"error":               err.Error(),
+			"prescription_blocked": true,
+		})
 		return
 	}
 
 	wo, err := c.workOrderService.GetWorkOrderByID(workOrderID)
 	if err != nil {
-		ctx.JSON(http.StatusNotFound, gin.H{"error": "Work order not found"})
+		ctx.JSON(http.StatusNotFound, gin.H{
+			"error":               "Work order not found",
+			"prescription_blocked": true,
+		})
 		return
 	}
 
 	if wo.ExpertID == nil || *wo.ExpertID != expertID {
-		ctx.JSON(http.StatusForbidden, gin.H{"error": "Only assigned expert can create prescription"})
+		ctx.JSON(http.StatusForbidden, gin.H{
+			"error":               "Only assigned expert can create prescription",
+			"prescription_blocked": true,
+		})
 		return
 	}
 
+	var medications []string
 	if req.Medications != "" {
-		var medications []string
 		if err := json.Unmarshal([]byte(req.Medications), &medications); err != nil {
 			medications = []string{req.Medications}
 		}
+	}
 
-		if len(medications) > 0 {
-			checkResult, err := c.imageService.CheckPrescriptionCompatibilityWithRetry(
-				medications,
-				workOrderID,
-				expertID,
-			)
+	checkResult, err := c.imageService.CheckPrescriptionCompatibilityWithRetry(
+		medications,
+		workOrderID,
+		expertID,
+	)
 
-			if err != nil {
-				ctx.JSON(http.StatusServiceUnavailable, gin.H{
-					"error":               "Prescription safety check failed - prescription BLOCKED for your safety",
-					"is_safe":             false,
-					"warnings":            checkResult.Warnings,
-					"suggestions":         checkResult.Suggestions,
-					"is_fallback":         checkResult.IsFallback,
-					"error_details":       err.Error(),
-					"prescription_blocked": true,
-				})
-				return
-			}
-
-			if checkResult.IsFallback {
-				if services.DefaultServiceConfig.FailOpen {
-					ctx.JSON(http.StatusAccepted, gin.H{
-						"warning":      "Compatibility check service unavailable - using fail-open mode",
-						"is_fallback":  true,
-						"warnings":     checkResult.Warnings,
-						"suggestions":  checkResult.Suggestions,
-					})
-				} else {
-					ctx.JSON(http.StatusServiceUnavailable, gin.H{
-						"error":               "Prescription safety check unavailable - prescription BLOCKED for safety",
-						"is_safe":             false,
-						"warnings":            checkResult.Warnings,
-						"suggestions":         "Please try again later or contact technical support",
-						"is_fallback":         true,
-						"prescription_blocked": true,
-					})
-					return
-				}
-			}
-
-			if !checkResult.IsSafe {
-				ctx.JSON(http.StatusBadRequest, gin.H{
-					"error":       "Medication compatibility issues detected - prescription not allowed",
-					"is_safe":     false,
-					"warnings":    checkResult.Warnings,
-					"suggestions": checkResult.Suggestions,
-				})
-				return
-			}
+	if err != nil {
+		var statusCode int
+		var warningMessage string
+		
+		if checkResult.CheckStatus == services.SafetyCheckCircuitOpen {
+			statusCode = http.StatusServiceUnavailable
+			warningMessage = "🚨 EMERGENCY: Safety check service has been disabled due to repeated failures. " +
+				"All prescriptions are BLOCKED until service is restored. Please contact technical support immediately."
+		} else if checkResult.CheckStatus == services.SafetyCheckTimeout {
+			statusCode = http.StatusGatewayTimeout
+			warningMessage = "🚨 TIMEOUT: Safety check service is not responding. " +
+				"Prescription BLOCKED for your safety. Please verify medication compatibility manually or try again later."
+		} else {
+			statusCode = http.StatusServiceUnavailable
+			warningMessage = "🚨 CRITICAL: Safety check failed. " +
+				"Prescription BLOCKED to protect patient safety. Please contact support if this issue persists."
 		}
+
+		ctx.JSON(statusCode, gin.H{
+			"error":                  warningMessage,
+			"is_safe":                false,
+			"warnings":               checkResult.Warnings,
+			"suggestions":            checkResult.Suggestions,
+			"is_fallback":            checkResult.IsFallback,
+			"check_status":           checkResult.CheckStatus,
+			"service_available":      checkResult.ServiceAvailable,
+			"error_details":          err.Error(),
+			"prescription_blocked":   true,
+			"security_policy":        "FAIL-CLOSED (Default) - No check = No prescription",
+			"recommended_action":     "Please verify the safety of this prescription manually before issuing.",
+		})
+		return
+	}
+
+	if checkResult.IsFallback {
+		if services.DefaultServiceConfig.FailOpen {
+			ctx.JSON(http.StatusAccepted, gin.H{
+				"warning":                "⚠️ SAFETY WARNING: Compatibility check service unavailable.",
+				"mode":                   "FAIL-OPEN (NOT RECOMMENDED for production)",
+				"is_fallback":            true,
+				"warnings":               checkResult.Warnings,
+				"suggestions":            checkResult.Suggestions,
+				"check_status":           checkResult.CheckStatus,
+				"security_notice":        "Prescription allowed due to fail-open configuration, but safety is NOT VERIFIED.",
+				"required_action":        "YOU MUST manually verify this prescription is safe before administering.",
+			})
+			return
+		} else {
+			ctx.JSON(http.StatusServiceUnavailable, gin.H{
+				"error":                  "🚨 SAFETY BLOCKED: Prescription compatibility check is unavailable.",
+				"is_safe":                false,
+				"warnings":               checkResult.Warnings,
+				"suggestions":            "Prescription BLOCKED. Please try again later or contact technical support.",
+				"is_fallback":            true,
+				"check_status":           checkResult.CheckStatus,
+				"service_available":      checkResult.ServiceAvailable,
+				"prescription_blocked":   true,
+				"security_policy":        "FAIL-CLOSED (Default) - Safety is our top priority.",
+				"rationale":              "Pesticide safety is critical. Better to delay than issue an unsafe prescription.",
+			})
+			return
+		}
+	}
+
+	if !checkResult.IsSafe {
+		ctx.JSON(http.StatusBadRequest, gin.H{
+			"error":                  "🚨 INCOMPATIBLE MEDICATIONS: Detected dangerous drug interactions.",
+			"is_safe":                false,
+			"warnings":               checkResult.Warnings,
+			"suggestions":            checkResult.Suggestions,
+			"check_status":           checkResult.CheckStatus,
+			"prescription_blocked":   true,
+			"security_policy":        "INCOMPATIBILITY DETECTED - Prescription not allowed",
+			"recommended_action":     "Please adjust the medication combination to avoid dangerous interactions.",
+			"medications_checked":    medications,
+		})
+		return
 	}
 
 	prescription := &models.Prescription{
@@ -455,17 +497,25 @@ func (c *WorkOrderController) CreatePrescription(ctx *gin.Context) {
 	}
 
 	if err := c.workOrderService.CreatePrescription(workOrderID, prescription, expertID); err != nil {
-		ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		ctx.JSON(http.StatusInternalServerError, gin.H{
+			"error":               "Failed to create prescription: " + err.Error(),
+			"prescription_blocked": true,
+		})
 		return
 	}
 
 	c.webSocketService.SendPrescriptionNotification(workOrderID, wo.FarmerID, prescription)
 
 	ctx.JSON(http.StatusOK, gin.H{
-		"message":              "Prescription created successfully",
+		"message":              "✅ Prescription created successfully",
 		"prescription":         prescription,
 		"compatibility_checked": true,
 		"is_safe":              true,
+		"check_status":         checkResult.CheckStatus,
+		"check_timestamp":      checkResult.CheckTimestamp,
+		"security_verified":    true,
+		"warnings":             checkResult.Warnings,
+		"medications":          medications,
 	})
 }
 
@@ -659,7 +709,7 @@ func (c *WorkOrderController) VerifyDiagnosisBinding(ctx *gin.Context) {
 func (c *WorkOrderController) ForceSafetyCheckDemo(ctx *gin.Context) {
 	scenario := ctx.Query("scenario")
 
-	var result *services.PrescriptionCheckResult
+	var result *services.PrescriptionSafetyResult
 	var err error
 
 	switch scenario {
@@ -686,6 +736,49 @@ func (c *WorkOrderController) ForceSafetyCheckDemo(ctx *gin.Context) {
 			"demo-expert-id",
 		)
 
+	case "empty_medications":
+		result, err = c.imageService.CheckPrescriptionCompatibilityWithRetry(
+			[]string{},
+			"demo-work-order-id",
+			"demo-expert-id",
+		)
+
+	case "no_identity":
+		result, err = c.imageService.CheckPrescriptionCompatibilityWithRetry(
+			[]string{"三环唑"},
+			"",
+			"",
+		)
+
+	case "circuit_breaker":
+		c.imageService.ResetCircuitBreaker()
+		for i := 0; i < services.DefaultServiceConfig.CircuitFailureThreshold; i++ {
+			originalURL := c.cfg.PythonServiceURL
+			c.cfg.PythonServiceURL = "http://nonexistent-service:9999"
+			tempService := services.NewImageService(c.cfg)
+			tempService.CheckPrescriptionCompatibilityWithRetry(
+				[]string{"三环唑"},
+				"demo-wo",
+				"demo-expert",
+			)
+			c.cfg.PythonServiceURL = originalURL
+		}
+		
+		state, failures, openTime := c.imageService.GetCircuitStatus()
+		ctx.JSON(http.StatusOK, gin.H{
+			"scenario":              "circuit_breaker_test",
+			"current_state":         state,
+			"consecutive_failures":  failures,
+			"circuit_open_time":     openTime,
+			"expected_behavior":     "After 5 failures, circuit should be OPEN and block all prescriptions",
+			"states": gin.H{
+				"CircuitClosed":   0,
+				"CircuitOpen":     1,
+				"CircuitHalfOpen": 2,
+			},
+		})
+		return
+
 	case "incompatible":
 		ctx.JSON(http.StatusOK, gin.H{
 			"scenario":          "incompatible_medications",
@@ -705,21 +798,46 @@ func (c *WorkOrderController) ForceSafetyCheckDemo(ctx *gin.Context) {
 		ctx.JSON(http.StatusOK, gin.H{
 			"scenario":          "fail_closed_security_policy",
 			"current_config": gin.H{
-				"fail_open":           services.DefaultServiceConfig.FailOpen,
-				"max_retries":         services.DefaultServiceConfig.MaxRetries,
-				"prescription_timeout": services.DefaultServiceConfig.PrescriptionTimeout.String(),
+				"fail_open":               services.DefaultServiceConfig.FailOpen,
+				"max_retries":             services.DefaultServiceConfig.MaxRetries,
+				"prescription_timeout":    services.DefaultServiceConfig.PrescriptionTimeout.String(),
+				"circuit_breaker_enabled": services.DefaultServiceConfig.CircuitBreakerEnabled,
+				"circuit_failure_threshold": services.DefaultServiceConfig.CircuitFailureThreshold,
+				"circuit_open_duration":   services.DefaultServiceConfig.CircuitOpenDuration.String(),
 			},
 			"security_policy": gin.H{
 				"description": "By default, Fail-Closed policy is ENABLED",
 				"behavior": "If compatibility check service is unavailable, times out, or returns error, prescription is BLOCKED",
 				"rationale": "Pesticide safety is critical. Better to delay prescription than issue an unsafe one.",
+				"conditions_blocked": []string{
+					"Service timeout",
+					"Service unavailable",
+					"Network error",
+					"Invalid response",
+					"Circuit breaker OPEN",
+					"Missing identity parameters",
+				},
+				"conditions_allowed": []string{
+					"Service returns is_safe=true",
+					"Empty medications (single agent use)",
+					"Fail-Open mode explicitly enabled (NOT RECOMMENDED)",
+				},
 			},
+		})
+		return
+
+	case "audit_logs":
+		logs := c.imageService.GetAuditLogs()
+		ctx.JSON(http.StatusOK, gin.H{
+			"scenario":     "audit_logs",
+			"total_logs":   len(logs),
+			"logs":         logs,
 		})
 		return
 
 	default:
 		ctx.JSON(http.StatusBadRequest, gin.H{
-			"error": "Invalid scenario. Available: timeout, service_down, incompatible, fail_closed",
+			"error": "Invalid scenario. Available: timeout, service_down, empty_medications, no_identity, circuit_breaker, incompatible, fail_closed, audit_logs",
 		})
 		return
 	}
@@ -731,13 +849,22 @@ func (c *WorkOrderController) ForceSafetyCheckDemo(ctx *gin.Context) {
 			"is_safe":             false,
 			"prescription_blocked": true,
 			"security_policy":     "FAIL-CLOSED (Default) - Safety check failed, prescription blocked",
-			"result":              result,
+			"check_status":        result.CheckStatus,
+			"warnings":            result.Warnings,
+			"suggestions":         result.Suggestions,
+			"is_fallback":         result.IsFallback,
 		})
 		return
 	}
 
 	ctx.JSON(http.StatusOK, gin.H{
-		"scenario": scenario,
-		"result":   result,
+		"scenario":           scenario,
+		"is_safe":            result.IsSafe,
+		"check_status":       result.CheckStatus,
+		"warnings":           result.Warnings,
+		"suggestions":        result.Suggestions,
+		"is_fallback":        result.IsFallback,
+		"check_timestamp":    result.CheckTimestamp,
+		"service_available":  result.ServiceAvailable,
 	})
 }
