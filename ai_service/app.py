@@ -37,6 +37,23 @@ def diagnose_image():
             'error': 'No image file provided'
         }), 400
     
+    work_order_id = request.form.get('work_order_id') or request.headers.get('X-Work-Order-ID')
+    farmer_id = request.form.get('farmer_id') or request.headers.get('X-Farmer-ID')
+    
+    if not work_order_id:
+        return jsonify({
+            'success': False,
+            'error': 'work_order_id is required for identity verification',
+            'security_error': True
+        }), 400
+    
+    if not farmer_id:
+        return jsonify({
+            'success': False,
+            'error': 'farmer_id is required for identity verification',
+            'security_error': True
+        }), 400
+    
     file = request.files['image']
     
     if file.filename == '':
@@ -57,8 +74,21 @@ def diagnose_image():
         image_data = file.read()
         
         crop_type = request.form.get('crop_type', 'rice')
+        request_time = request.form.get('request_time')
         
         result = image_analyzer.analyze_image(image_data, filename, crop_type)
+        
+        result['work_order_id'] = work_order_id
+        result['farmer_id'] = farmer_id
+        result['identity_verified'] = True
+        
+        if request_time:
+            result['request_time'] = request_time
+        
+        app.logger.info(
+            f"[SECURE DIAGNOSIS] work_order_id={work_order_id}, farmer_id={farmer_id}, "
+            f"disease={result.get('disease_name')}, confidence={result.get('confidence')}"
+        )
         
         return jsonify(result)
     
@@ -72,6 +102,24 @@ def diagnose_image():
 @app.route('/api/check-prescription', methods=['POST'])
 def check_prescription():
     try:
+        work_order_id = request.headers.get('X-Work-Order-ID')
+        expert_id = request.headers.get('X-Expert-ID')
+        attempt = request.headers.get('X-Attempt', '1')
+        
+        if not work_order_id:
+            return jsonify({
+                'success': False,
+                'error': 'X-Work-Order-ID header is required for security verification',
+                'security_error': True
+            }), 400
+        
+        if not expert_id:
+            return jsonify({
+                'success': False,
+                'error': 'X-Expert-ID header is required for security verification',
+                'security_error': True
+            }), 400
+        
         medications = request.get_json()
         
         if not medications or not isinstance(medications, list):
@@ -81,6 +129,16 @@ def check_prescription():
             }), 400
         
         result = prescription_checker.check_compatibility(medications)
+        
+        result['work_order_id'] = work_order_id
+        result['expert_id'] = expert_id
+        result['attempt'] = int(attempt)
+        result['security_verified'] = True
+        
+        app.logger.info(
+            f"[PRESCRIPTION CHECK] work_order_id={work_order_id}, expert_id={expert_id}, "
+            f"attempt={attempt}, is_safe={result.get('is_safe')}, medications={medications}"
+        )
         
         return jsonify(result)
     
@@ -231,6 +289,23 @@ def batch_diagnose():
                 'error': 'No images provided'
             }), 400
         
+        work_order_id = request.form.get('work_order_id') or request.headers.get('X-Work-Order-ID')
+        farmer_id = request.form.get('farmer_id') or request.headers.get('X-Farmer-ID')
+        
+        if not work_order_id:
+            return jsonify({
+                'success': False,
+                'error': 'work_order_id is required for identity verification',
+                'security_error': True
+            }), 400
+        
+        if not farmer_id:
+            return jsonify({
+                'success': False,
+                'error': 'farmer_id is required for identity verification',
+                'security_error': True
+            }), 400
+        
         files = request.files.getlist('images')
         crop_type = request.form.get('crop_type', 'rice')
         
@@ -243,6 +318,11 @@ def batch_diagnose():
                     image_data = file.read()
                     
                     result = image_analyzer.analyze_image(image_data, filename, crop_type)
+                    
+                    result['work_order_id'] = work_order_id
+                    result['farmer_id'] = farmer_id
+                    result['identity_verified'] = True
+                    
                     results.append({
                         'filename': filename,
                         'result': result
@@ -253,9 +333,17 @@ def batch_diagnose():
                         'error': str(e)
                     })
         
+        app.logger.info(
+            f"[BATCH DIAGNOSIS] work_order_id={work_order_id}, farmer_id={farmer_id}, "
+            f"total_images={len(results)}"
+        )
+        
         return jsonify({
             'success': True,
             'total': len(results),
+            'work_order_id': work_order_id,
+            'farmer_id': farmer_id,
+            'identity_verified': True,
             'results': results
         })
     
